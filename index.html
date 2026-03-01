@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Audio Recorder</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f2f2f7;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 20px;
+      padding: 36px 32px;
+      width: 100%;
+      max-width: 520px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+    }
+
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      color: #1c1c1e;
+      margin-bottom: 4px;
+    }
+
+    .subtitle {
+      font-size: 14px;
+      color: #8e8e93;
+      margin-bottom: 32px;
+    }
+
+    /* Timer */
+    .timer {
+      font-size: 52px;
+      font-weight: 200;
+      color: #1c1c1e;
+      letter-spacing: 2px;
+      text-align: center;
+      margin-bottom: 8px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .status {
+      text-align: center;
+      font-size: 13px;
+      color: #8e8e93;
+      min-height: 20px;
+      margin-bottom: 28px;
+    }
+
+    .status.recording { color: #ff3b30; }
+    .status.ready     { color: #34c759; }
+
+    /* Waveform */
+    canvas {
+      width: 100%;
+      height: 64px;
+      border-radius: 12px;
+      background: #f2f2f7;
+      margin-bottom: 28px;
+      display: block;
+    }
+
+    /* Buttons */
+    .btn-row {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 28px;
+    }
+
+    button {
+      flex: 1;
+      padding: 14px;
+      border: none;
+      border-radius: 12px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+
+    button:active { transform: scale(0.97); }
+    button:disabled { opacity: 0.35; cursor: default; }
+
+    #btnRecord  { background: #ff3b30; color: #fff; }
+    #btnStop    { background: #f2f2f7; color: #1c1c1e; }
+    #btnExport  { background: #007aff; color: #fff; }
+
+    /* Dictation box */
+    .dictation-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: #8e8e93;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }
+
+    #dictationBox {
+      width: 100%;
+      min-height: 120px;
+      border: 1.5px solid #e5e5ea;
+      border-radius: 12px;
+      padding: 12px 14px;
+      font-size: 15px;
+      color: #1c1c1e;
+      resize: vertical;
+      line-height: 1.5;
+      outline: none;
+      font-family: inherit;
+    }
+
+    #dictationBox:focus { border-color: #007aff; }
+
+    .dictation-hint {
+      font-size: 12px;
+      color: #aeaeb2;
+      margin-top: 6px;
+    }
+
+    /* Export status */
+    #exportStatus {
+      text-align: center;
+      font-size: 13px;
+      color: #34c759;
+      min-height: 20px;
+      margin-top: 16px;
+    }
+
+    /* Pulse ring on record */
+    @keyframes pulse {
+      0%   { box-shadow: 0 0 0 0 rgba(255,59,48,0.4); }
+      70%  { box-shadow: 0 0 0 12px rgba(255,59,48,0); }
+      100% { box-shadow: 0 0 0 0 rgba(255,59,48,0); }
+    }
+    #btnRecord.pulsing { animation: pulse 1.2s infinite; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>Audio Recorder</h1>
+  <p class="subtitle">Records audio + Apple Dictation for transcription</p>
+
+  <div class="timer" id="timer">00:00</div>
+  <div class="status" id="status">Ready to record</div>
+
+  <canvas id="waveform"></canvas>
+
+  <div class="btn-row">
+    <button id="btnRecord">Record</button>
+    <button id="btnStop" disabled>Stop</button>
+    <button id="btnExport" disabled>Export</button>
+  </div>
+
+  <div class="dictation-label">Apple Dictation</div>
+  <textarea id="dictationBox" placeholder="Enable Apple Dictation (Fn Fn or Globe key), then speak — text appears here automatically. You can also type or paste manually."></textarea>
+  <div class="dictation-hint">Captured alongside your recording. Exported as a separate .txt file.</div>
+
+  <div id="exportStatus"></div>
+</div>
+
+<script>
+  // ── State ──────────────────────────────────────────────────────────
+  let mediaRecorder = null;
+  let audioChunks   = [];
+  let audioBlob     = null;
+  let startTime     = null;
+  let timerInterval = null;
+  let animFrame     = null;
+  let analyser      = null;
+  let audioCtx      = null;
+
+  // ── Elements ───────────────────────────────────────────────────────
+  const btnRecord    = document.getElementById("btnRecord");
+  const btnStop      = document.getElementById("btnStop");
+  const btnExport    = document.getElementById("btnExport");
+  const timerEl      = document.getElementById("timer");
+  const statusEl     = document.getElementById("status");
+  const dictBox      = document.getElementById("dictationBox");
+  const exportStatus = document.getElementById("exportStatus");
+  const canvas       = document.getElementById("waveform");
+  const ctx          = canvas.getContext("2d");
+
+  // ── Helpers ────────────────────────────────────────────────────────
+  function timestamp() {
+    const d = new Date();
+    const pad = n => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
+  }
+
+  function formatTime(ms) {
+    const s = Math.floor(ms / 1000);
+    const m = Math.floor(s / 60);
+    return `${String(m).padStart(2,"0")}:${String(s % 60).padStart(2,"0")}`;
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a   = document.createElement("a");
+    a.href     = url;
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  // ── Waveform ───────────────────────────────────────────────────────
+  function drawWaveform() {
+    if (!analyser) return;
+    animFrame = requestAnimationFrame(drawWaveform);
+
+    const W = canvas.width  = canvas.offsetWidth  * window.devicePixelRatio;
+    const H = canvas.height = canvas.offsetHeight * window.devicePixelRatio;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteTimeDomainData(data);
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.beginPath();
+    ctx.strokeStyle = "#ff3b30";
+    ctx.lineWidth   = 2 * window.devicePixelRatio;
+
+    const slice = W / data.length;
+    let x = 0;
+    for (let i = 0; i < data.length; i++) {
+      const v = data[i] / 128.0;
+      const y = (v * H) / 2;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      x += slice;
+    }
+    ctx.stroke();
+  }
+
+  function clearWaveform() {
+    cancelAnimationFrame(animFrame);
+    const W = canvas.width  = canvas.offsetWidth  * window.devicePixelRatio;
+    const H = canvas.height = canvas.offsetHeight * window.devicePixelRatio;
+    ctx.clearRect(0, 0, W, H);
+  }
+
+  // ── Record ─────────────────────────────────────────────────────────
+  btnRecord.addEventListener("click", async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      // Waveform analyser
+      audioCtx  = new AudioContext();
+      analyser  = audioCtx.createAnalyser();
+      analyser.fftSize = 1024;
+      audioCtx.createMediaStreamSource(stream).connect(analyser);
+
+      // Prefer wav-friendly format; fallback to webm
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm";
+
+      mediaRecorder = new MediaRecorder(stream, { mimeType });
+      audioChunks   = [];
+      audioBlob     = null;
+
+      mediaRecorder.ondataavailable = e => {
+        if (e.data.size > 0) audioChunks.push(e.data);
+      };
+
+      mediaRecorder.onstop = () => {
+        audioBlob = new Blob(audioChunks, { type: mimeType });
+        stream.getTracks().forEach(t => t.stop());
+        if (audioCtx) { audioCtx.close(); audioCtx = null; }
+        analyser = null;
+        clearWaveform();
+
+        btnExport.disabled = false;
+        statusEl.className = "status ready";
+        statusEl.textContent = "Recording saved — ready to export";
+      };
+
+      mediaRecorder.start(100);
+      startTime = Date.now();
+
+      timerInterval = setInterval(() => {
+        timerEl.textContent = formatTime(Date.now() - startTime);
+      }, 500);
+
+      drawWaveform();
+
+      btnRecord.disabled = true;
+      btnRecord.classList.add("pulsing");
+      btnStop.disabled   = false;
+      btnExport.disabled = true;
+      exportStatus.textContent = "";
+      statusEl.className = "status recording";
+      statusEl.textContent = "Recording...";
+
+    } catch (err) {
+      statusEl.className = "status";
+      statusEl.textContent = "Microphone access denied — please allow mic in browser settings";
+      console.error(err);
+    }
+  });
+
+  // ── Stop ───────────────────────────────────────────────────────────
+  btnStop.addEventListener("click", () => {
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+      mediaRecorder.stop();
+    }
+    clearInterval(timerInterval);
+    btnRecord.disabled = false;
+    btnRecord.classList.remove("pulsing");
+    btnStop.disabled   = true;
+  });
+
+  // ── Export ─────────────────────────────────────────────────────────
+  btnExport.addEventListener("click", () => {
+    if (!audioBlob) return;
+
+    const ts   = timestamp();
+    const ext  = audioBlob.type.includes("webm") ? "webm" : "wav";
+    const dictText = dictBox.value.trim();
+
+    // 1. Download audio
+    downloadBlob(audioBlob, `${ts}.${ext}`);
+
+    // 2. Download dictation (even if empty — keeps pipeline consistent)
+    const txtBlob = new Blob([dictText || ""], { type: "text/plain;charset=utf-8" });
+    downloadBlob(txtBlob, `${ts}_dictation.txt`);
+
+    exportStatus.textContent = `Exported: ${ts}.${ext}  +  ${ts}_dictation.txt`;
+  });
+</script>
+</body>
+</html>
