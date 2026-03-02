@@ -25,10 +25,11 @@ Requirements:
     LM Studio running locally with a model loaded (https://lmstudio.ai)
 """
 
+import os
+os.environ["PYANNOTE_TELEMETRY"] = "off"
 import argparse
 import json
 import re
-import os
 from pathlib import Path
 
 
